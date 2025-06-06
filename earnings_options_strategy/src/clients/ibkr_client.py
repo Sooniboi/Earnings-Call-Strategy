@@ -34,7 +34,7 @@ class IBKRClient:
 
     def get_option_chain(self, symbol: str) -> pd.DataFrame:
         """
-        Fetch all available option contracts and their market data for a given symbol.
+        Fetch option contracts for the nearest expiry and strikes within ±20% of the underlying price.
         Returns a DataFrame with contract identifiers, market data, greeks, and underlying data.
         """
         self.connect()
@@ -47,32 +47,38 @@ class IBKRClient:
             return pd.DataFrame()
         chain = chains[0]
         logger.info(f"Found {len(chain.expirations)} expirations and {len(chain.strikes)} strikes.")
-        
-        # Get all combinations of expiry, strike, right
+
+        # Get underlying price
+        underlying_ticker = self.ib.reqTickers(stock)[0]
+        underlying_price = underlying_ticker.marketPrice()
+        logger.info(f"Underlying price: {underlying_price}")
+
+        # Select nearest expiry
+        nearest_expiry = min(chain.expirations)
+        logger.info(f"Nearest expiry: {nearest_expiry}")
+
+        # Filter strikes within ±20% of underlying price
+        min_strike = underlying_price * 0.8
+        max_strike = underlying_price * 1.2
+        filtered_strikes = [strike for strike in chain.strikes if min_strike <= strike <= max_strike]
+        logger.info(f"Filtered to {len(filtered_strikes)} strikes within ±20% of underlying price.")
+
+        # Get contracts for nearest expiry and filtered strikes
         contracts = []
-        for expiry in chain.expirations:
-            for strike in chain.strikes:
-                for right in ['C', 'P']:
-                    contracts.append(Option(symbol, expiry, strike, right, 'SMART'))
+        for strike in filtered_strikes:
+            for right in ['C', 'P']:
+                contracts.append(Option(symbol, nearest_expiry, strike, right, 'SMART'))
         logger.info(f"Total contracts to request: {len(contracts)}")
-        
+
         # Qualify all contracts (get conId etc.)
         qualified_contracts = self.ib.qualifyContracts(*contracts)
         logger.info(f"Qualified {len(qualified_contracts)} contracts.")
-        
+
         # Request market data snapshots for all contracts
         logger.info("Requesting market data snapshots (this may take a while)...")
         tickers = self.ib.reqTickers(*qualified_contracts)
         logger.info(f"Received {len(tickers)} tickers.")
-        
-        # Get underlying data
-        underlying_ticker = self.ib.reqTickers(stock)[0]
-        underlying_data = {
-            'underlyingLast': underlying_ticker.marketPrice(),
-            'underlyingBid': underlying_ticker.bid,
-            'underlyingAsk': underlying_ticker.ask
-        }
-        
+
         # Build DataFrame
         rows = []
         for ticker in tickers:
@@ -93,9 +99,9 @@ class IBKRClient:
                 'gamma': ticker.modelGreeks.gamma if ticker.modelGreeks else None,
                 'theta': ticker.modelGreeks.theta if ticker.modelGreeks else None,
                 'vega': ticker.modelGreeks.vega if ticker.modelGreeks else None,
-                'underlyingLast': underlying_data['underlyingLast'],
-                'underlyingBid': underlying_data['underlyingBid'],
-                'underlyingAsk': underlying_data['underlyingAsk']
+                'underlyingLast': underlying_price,
+                'underlyingBid': underlying_ticker.bid,
+                'underlyingAsk': underlying_ticker.ask
             }
             rows.append(row)
         df = pd.DataFrame(rows)
